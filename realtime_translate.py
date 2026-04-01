@@ -6,9 +6,11 @@ from collections import deque, Counter
 import pyttsx3
 
 # -------- Load model --------
+# Load the pre-trained classifier
 model = joblib.load("model/asl_model.pkl")
 
 # -------- TTS --------
+# Initialize Text-to-Speech engine
 engine = pyttsx3.init()
 
 # -------- MediaPipe Tasks API --------
@@ -20,6 +22,7 @@ HandLandmarker = mp.tasks.vision.HandLandmarker
 HandLandmarkerOptions = mp.tasks.vision.HandLandmarkerOptions
 VisionRunningMode = mp.tasks.vision.RunningMode
 
+# Configure landmarker for VIDEO mode (synchronous processing per frame)
 options = HandLandmarkerOptions(
     base_options=BaseOptions(model_asset_path="hand_landmarker.task"),
     running_mode=VisionRunningMode.VIDEO,
@@ -29,6 +32,7 @@ options = HandLandmarkerOptions(
 )
 
 # -------- Smoothing buffer --------
+# Use a deque to store the last 15 predictions to reduce flickering/jitter
 buffer = deque(maxlen=15)
 sentence = ""
 
@@ -38,6 +42,7 @@ if not cap.isOpened():
 
 frame_count = 0
 
+# --- Inference Loop ---
 with HandLandmarker.create_from_options(options) as landmarker:
     while True:
         ret, frame = cap.read()
@@ -48,43 +53,50 @@ with HandLandmarker.create_from_options(options) as landmarker:
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
 
+        # In VIDEO mode, timestamps must be monotonically increasing
         timestamp_ms = int(frame_count * 33)
         frame_count += 1
 
+        # Process the image to find landmarks
         result = landmarker.detect_for_video(mp_image, timestamp_ms)
 
         prediction = ""
 
         if result and result.hand_landmarks:
-            # first hand only
+            # Extract landmarks for the first hand detected
             hand_landmarks = result.hand_landmarks[0]
 
             landmarks = []
             for lm in hand_landmarks:
                 landmarks.extend([lm.x, lm.y, lm.z])
 
+            # Ensure we have all 63 coordinates (21 points * 3 dimensions)
             if len(landmarks) == 63:
+                # Use the ML model to predict the label
                 pred = model.predict([landmarks])[0]
                 buffer.append(pred)
 
+                # Use the most frequent prediction in the buffer to smooth the result
                 if len(buffer) == buffer.maxlen:
                     prediction = Counter(buffer).most_common(1)[0][0]
             else:
                 prediction = ""
 
-            # optionally draw simple landmarks points
+            # Draw circles on the landmarks for visual feedback
             for lm in hand_landmarks:
                 cx, cy = int(lm.x * frame.shape[1]), int(lm.y * frame.shape[0])
                 cv2.circle(frame, (cx, cy), 2, (0, 255, 0), -1)
 
         # -------- Sentence builder --------
+        # If a stable prediction exists and it differs from the last character in the sentence
         if prediction:
             if not sentence or prediction != sentence[-1]:
                 sentence += prediction
+                # Speak the new character
                 engine.say(prediction)
                 engine.runAndWait()
 
-        # -------- Display --------
+        # -------- UI Display --------
         cv2.putText(frame, f"Current: {prediction}", (10, 40),
                     cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
         cv2.putText(frame, f"Sentence: {sentence}", (10, 80),
@@ -95,9 +107,9 @@ with HandLandmarker.create_from_options(options) as landmarker:
         cv2.imshow("Production Sign Translator", frame)
 
         key = cv2.waitKey(1) & 0xFF
-        if key == 27:
+        if key == 27: # ESC
             break
-        if key == ord("c"):
+        if key == ord("c"): # Clear sentence and buffer
             sentence = ""
             buffer.clear()
 
